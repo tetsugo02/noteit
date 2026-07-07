@@ -13,6 +13,7 @@ dependencies = [
     "pydub>=0.25.1",
     "python-dotenv>=1.2.2",
     "soundfile>=0.14.0",
+    "transformers>=5.13.0",
 ]
 
 [project.scripts]
