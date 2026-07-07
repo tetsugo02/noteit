@@ -1,0 +1,9 @@
+*.m4a
+*.wav
+
+.env
+
+.codegraph
+
+
+*.pyc
