@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from transcription_worker.speaker_diarizer import ModelType, SpeakerDiarizer
+from transcription_worker.speaker_diarizer import DiarizerModelType, SpeakerDiarizer
 from transcription_worker.utils.audio_format_concert import convert_audio_format
 
 
@@ -16,7 +16,7 @@ def main() -> None:
 
     audio_file_path = Path("./jojo.wav")
 
-    diarizer = SpeakerDiarizer(hf_token=token, model_type=ModelType.COMMUNITY)
+    diarizer = SpeakerDiarizer(hf_token=token, model_type=DiarizerModelType.COMMUNITY)
     output = diarizer.diarize(audio_file_path)
     print("Diarization Output:", output)
 

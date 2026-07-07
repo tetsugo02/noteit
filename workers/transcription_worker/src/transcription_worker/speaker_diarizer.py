@@ -10,23 +10,23 @@ from transcription_worker.utils.audio_format_concert import convert_audio_format
 from .schema import SpeakerSegment
 
 
-class ModelType(StrEnum):
+class DiarizerModelType(StrEnum):
     COMMUNITY = "community"
     STANDARD = "standard"
 
 
-MODEL_IDS: dict[ModelType, str] = {
-    ModelType.COMMUNITY: "pyannote/speaker-diarization-community-1",
-    ModelType.STANDARD: "pyannote/speaker-diarization-3.1",
+DIARIZER_MODEL_IDS: dict[DiarizerModelType, str] = {
+    DiarizerModelType.COMMUNITY: "pyannote/speaker-diarization-community-1",
+    DiarizerModelType.STANDARD: "pyannote/speaker-diarization-3.1",
 }
 
 
 class SpeakerDiarizer:
     def __init__(
-        self, hf_token: str, model_type: ModelType, device: str = "cuda"
+        self, hf_token: str, model_type: DiarizerModelType, device: str = "cuda"
     ) -> None:
         self.diarizer_pipline = Pipeline.from_pretrained(
-            MODEL_IDS[model_type],
+            DIARIZER_MODEL_IDS[model_type],
             token=hf_token,
         )
 
