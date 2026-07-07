@@ -83,7 +83,16 @@ def main() -> None:
         raise FileNotFoundError(f"Sample audio file not found: {audio_file_path}")
 
     diarizer = SpeakerDiarizer(hf_token=token, model_type=DiarizerModelType.COMMUNITY)
-    whisper = Whisper(hf_token=token, model_type=WhisperModelType.TURBO)
+    compile_model = os.environ.get("WHISPER_COMPILE", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+    whisper = Whisper(
+        hf_token=token,
+        model_type=WhisperModelType.TURBO,
+        compile_model=compile_model,
+    )
     words = diarize_and_transcribe(
         audio_file_path,
         diarizer,
