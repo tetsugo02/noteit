@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "noteit": {
+      "command": "uv",
+      "args": ["run", "--directory", "workers/transcription_worker", "noteit-mcp"],
+      "env": {
+        "NOTEIT_WHISPER_MODEL": "small"
+      }
+    }
+  }
+}

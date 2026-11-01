@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .whisper import Whisper
 
 ProgressCallback = Callable[[SpeakerSegment], None]
+DiarizedCallback = Callable[[list[SpeakerSegment]], None]
 
 
 class TranscriptionWorker:
@@ -35,29 +36,67 @@ class TranscriptionWorker:
         audio_file_path: str | Path,
         *,
         language: str | None = None,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
         on_segment: ProgressCallback | None = None,
+        on_diarized: DiarizedCallback | None = None,
     ) -> list[SpeakerAssignedWord]:
-        """Return schema-compatible, speaker-assigned words for one audio file."""
+        """Return schema-compatible, speaker-assigned words for one audio file.
+
+        Any format ffmpeg can read (m4a, mp3, mp4, ...) is accepted. Speaker
+        count hints are forwarded to pyannote and improve diarization when known.
+        """
         file_path = Path(audio_file_path)
         if not file_path.is_file():
             raise FileNotFoundError(f"Audio file not found: {file_path}")
 
+        speaker_hints = {
+            key: value
+            for key, value in {
+                "num_speakers": num_speakers,
+                "min_speakers": min_speakers,
+                "max_speakers": max_speakers,
+            }.items()
+            if value is not None
+        }
+
         with self._inference_lock:
-            return self._transcribe(file_path, language=language, on_segment=on_segment)
+            return self._transcribe(
+                file_path,
+                language=language,
+                speaker_hints=speaker_hints,
+                on_segment=on_segment,
+                on_diarized=on_diarized,
+            )
 
     def _transcribe(
         self,
         audio_file_path: Path,
         *,
         language: str | None,
+        speaker_hints: dict[str, int],
         on_segment: ProgressCallback | None,
+        on_diarized: DiarizedCallback | None,
     ) -> list[SpeakerAssignedWord]:
-        speaker_segments = self._diarizer.diarize(audio_file_path)
-        audio = AudioSegment.from_file(audio_file_path)
         result: list[SpeakerAssignedWord] = []
 
         with TemporaryDirectory(prefix="noteit-transcription-") as temporary_directory:
             temporary_path = Path(temporary_directory)
+
+            # Decode once to 16 kHz mono WAV, which both pyannote and Whisper
+            # expect, instead of writing a converted file next to the input.
+            audio = (
+                AudioSegment.from_file(audio_file_path)
+                .set_channels(1)
+                .set_frame_rate(16_000)
+            )
+            wav_path = temporary_path / "input.wav"
+            audio.export(wav_path, format="wav")
+
+            speaker_segments = self._diarizer.diarize(wav_path, **speaker_hints)
+            if on_diarized is not None:
+                on_diarized(speaker_segments)
 
             for index, segment in enumerate(speaker_segments):
                 start_ms = max(0, round(segment.start_time * 1000))
@@ -75,8 +114,7 @@ class TranscriptionWorker:
                 result.extend(
                     SpeakerAssignedWord(
                         word=word.word,
-                        start_time_seconds=segment.start_time
-                        + word.start_time_seconds,
+                        start_time_seconds=segment.start_time + word.start_time_seconds,
                         end_time_seconds=segment.start_time + word.end_time_seconds,
                         probablility=word.probablility,
                         speaker_label=segment.speaker_label,

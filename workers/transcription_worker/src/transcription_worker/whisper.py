@@ -1,29 +1,36 @@
 from collections.abc import Mapping
-from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from transformers.pipelines import automatic_speech_recognition as _asr_pipeline
 from transformers.pipelines.base import Pipeline
 
+from .models import WHISPER_MODEL_IDS, WhisperModelType, resolve_device
 from .schema import TranscribedWord
+from .utils.audio_io import read_mono
+
+__all__ = ["Whisper", "WhisperModelType"]
 
 
-class WhisperModelType(StrEnum):
-    """Stable model names that can be exposed by the worker API."""
+def _torchcodec_loads() -> bool:
+    """True only if torchcodec's native libraries actually load.
 
-    TURBO = "turbo"
-    LARGE = "large"
-    MEDIUM = "medium"
+    transformers imports torchcodec whenever the package is installed, even for
+    in-memory input, and crashes when it cannot find a supported FFmpeg (e.g.
+    Homebrew FFmpeg 9). We always pass arrays, so treat a broken install as absent.
+    """
+    try:
+        import torchcodec.decoders  # noqa: F401
+    except Exception:  # noqa: BLE001 - OSError/RuntimeError from dlopen
+        return False
+    return True
 
 
-WHISPER_MODEL_IDS: dict[WhisperModelType, str] = {
-    WhisperModelType.TURBO: "openai/whisper-large-v3-turbo",
-    WhisperModelType.LARGE: "openai/whisper-large-v3",
-    WhisperModelType.MEDIUM: "openai/whisper-medium",
-}
+_TORCHCODEC_LOADS = _torchcodec_loads()
+_asr_pipeline.is_torchcodec_available = lambda: _TORCHCODEC_LOADS  # type: ignore[attr-defined]
 
 
 class Whisper:
@@ -36,10 +43,11 @@ class Whisper:
         device: str | None = None,
         compile_model: bool = True,
     ) -> None:
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        if self.device.startswith("cuda") and not torch.cuda.is_available():
-            raise RuntimeError("CUDA was requested, but CUDA is not available.")
+        self.device = resolve_device(device or "auto")
+        self.model_type = model_type
 
+        # float16 on MPS can produce NaNs/garbage with some Whisper checkpoints,
+        # so only CUDA uses half precision.
         dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
         model_id = WHISPER_MODEL_IDS[model_type]
 
@@ -93,11 +101,13 @@ class Whisper:
         if language is not None:
             inference_options["language"] = language
 
+        samples, sample_rate = read_mono(file_path)
+        audio = {"raw": samples, "sampling_rate": sample_rate}
         if self.is_compiled:
             with sdpa_kernel(SDPBackend.MATH):
-                raw_result = self.pipe(str(file_path), **inference_options)
+                raw_result = self.pipe(audio, **inference_options)
         else:
-            raw_result = self.pipe(str(file_path), **inference_options)
+            raw_result = self.pipe(audio, **inference_options)
         return self._to_transcribed_words(raw_result)
 
     @staticmethod

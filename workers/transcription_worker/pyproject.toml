@@ -1,12 +1,13 @@
 [project]
 name = "transcription-worker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Speaker-labelled meeting transcription (pyannote + Whisper) with an MCP server"
 readme = "README.md"
 authors = [{ name = "tetsugo", email = "tetsugou2002@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "faster-whisper>=1.2.1",
+    "mcp>=1.0",
     "numpy>=2.5.0",
     "pyannote-audio>=4.0.7",
     "pydantic-settings>=2.14.2",
@@ -18,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 transcribe-audio = "transcription_worker.cli:main"
+noteit-mcp = "transcription_worker.mcp_server:main"
 
 [build-system]
 requires = ["uv_build>=0.8.12,<0.9.0"]
