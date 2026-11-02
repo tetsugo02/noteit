@@ -1,0 +1,17 @@
+services:
+  inference:
+    build:
+      context: ../..
+      dockerfile: infra/inference/Dockerfile
+    environment:
+      NOTEIT_API_TOKEN: ${NOTEIT_API_TOKEN:?Set NOTEIT_API_TOKEN in .env}
+      HUGGINGFACE_ACCESS_TOKEN: ${HUGGINGFACE_ACCESS_TOKEN:-}
+      NOTEIT_WHISPER_MODEL: ${NOTEIT_WHISPER_MODEL:-small}
+    ports:
+      - "${NOTEIT_BIND_IP:-127.0.0.1}:${NOTEIT_PORT:-8765}:8765"
+    volumes:
+      - noteit-data:/data
+    restart: unless-stopped
+    stop_grace_period: 15s
+volumes:
+  noteit-data:

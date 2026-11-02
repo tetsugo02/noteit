@@ -1,23 +1,57 @@
 [project]
 name = "transcription-worker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Speaker-labelled meeting transcription (pyannote + Whisper) with an MCP server"
 readme = "README.md"
 authors = [{ name = "tetsugo", email = "tetsugou2002@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
-    "faster-whisper>=1.2.1",
-    "numpy>=2.5.0",
-    "pyannote-audio>=4.0.7",
-    "pydantic-settings>=2.14.2",
-    "pydub>=0.25.1",
-    "python-dotenv>=1.2.2",
-    "soundfile>=0.14.0",
-    "transformers>=5.13.0",
+    "httpx==0.28.1",
+    "mcp==2.3.0",
+    "pydantic-settings==2.14.2",
+    "python-dotenv==1.2.2",
+    "fastapi==0.162.0",
+    "python-multipart==0.0.33",
+    "uvicorn==0.54.0",
+    "keyring>=25.6,<26",
 ]
 
 [project.scripts]
 transcribe-audio = "transcription_worker.cli:main"
+noteit-mcp = "transcription_worker.mcp_server:main"
+noteit-server = "transcription_worker.server:main"
+noteit-front = "transcription_worker.frontend:main"
+
+[project.optional-dependencies]
+cpu = ["faster-whisper==1.2.1", "ctranslate2==4.8.0", "pydub==0.25.1"]
+mac-gpu = ["mlx-whisper==0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'", "pydub==0.25.1"]
+diarization = ["pyannote-audio==4.0.7", "soundfile==0.14.0", "numpy==2.5.0"]
+server = ["transcription-worker[cpu,diarization]", "torch==2.10.0", "torchaudio==2.10.0", "torchcodec==0.10.0"]
+server-cuda = ["transcription-worker[cpu,diarization]", "torch==2.10.0", "torchaudio==2.10.0", "torchcodec==0.10.0"]
+
+[tool.uv]
+conflicts = [[{extra = "server"}, {extra = "server-cuda"}]]
+
+[tool.uv.sources]
+torch = [
+    {index = "pytorch-cpu", marker = "sys_platform == 'linux'", extra = "server"},
+    {index = "pytorch-cu128", marker = "sys_platform == 'linux'", extra = "server-cuda"},
+]
+torchaudio = [
+    {index = "pytorch-cpu", marker = "sys_platform == 'linux'", extra = "server"},
+    {index = "pytorch-cu128", marker = "sys_platform == 'linux'", extra = "server-cuda"},
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 
 [build-system]
 requires = ["uv_build>=0.8.12,<0.9.0"]
