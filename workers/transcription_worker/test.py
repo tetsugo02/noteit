@@ -31,7 +31,7 @@ def main() -> None:
         raise FileNotFoundError(f"Sample audio file not found: {audio_file_path}")
 
     diarizer = SpeakerDiarizer(hf_token=token, model_type=DiarizerModelType.COMMUNITY)
-    compile_model = os.environ.get("WHISPER_COMPILE", "1").lower() not in {
+    compile_model = os.environ.get("WHISPER_COMPILE", "0").lower() not in {
         "0",
         "false",
         "no",
@@ -46,7 +46,7 @@ def main() -> None:
         audio_file_path,
         language=os.environ.get("WHISPER_LANGUAGE", "ja"),
         on_segment=lambda segment: print(
-            f"Transcribing {segment.speaker_label}: "
+            f"Recognized through {segment.speaker_label}: "
             f"{segment.start_time:.2f}s - {segment.end_time:.2f}s"
         ),
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -15,6 +16,7 @@ from .models import (
     DiarizerModelType,
     WhisperModelType,
 )
+from .backends import FINISHED, LocalBackend, RemoteBackend, TranscriptionBackend
 from .service import JobStatus, ServiceConfig, TranscriptionService
 from .transcript import format_transcript
 
@@ -43,9 +45,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--device", choices=DEVICE_CHOICES, help="Whisper device (default: auto)"
     )
+    parser.add_argument(
+        "--no-diarize", action="store_true", help="Whisper only; no HF token required"
+    )
     parser.add_argument("-n", "--num-speakers", type=int)
     parser.add_argument("--min-speakers", type=int)
     parser.add_argument("--max-speakers", type=int)
+    parser.add_argument(
+        "--server",
+        default=os.environ.get("NOTEIT_SERVER_URL"),
+        help="Inference server URL (default: $NOTEIT_SERVER_URL; unset = run locally)",
+    )
     parser.add_argument(
         "-o", "--output", type=Path, help="Write the transcript text here"
     )
@@ -56,12 +66,16 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     args = build_parser().parse_args(argv)
 
-    config = ServiceConfig.from_env()
-    if args.device:
-        config = replace(config, device=args.device)
-    service = TranscriptionService(config)
+    backend: TranscriptionBackend
+    if args.server:
+        backend = RemoteBackend(args.server, os.environ.get("NOTEIT_API_TOKEN"))
+    else:
+        config = ServiceConfig.from_env()
+        if args.device:
+            config = replace(config, device=args.device)
+        backend = LocalBackend(TranscriptionService(config))
 
-    job = service.submit(
+    snapshot = backend.submit(
         args.audio,
         language=None if args.language == "auto" else args.language,
         whisper_model=args.whisper_model,
@@ -69,23 +83,33 @@ def main(argv: list[str] | None = None) -> int:
         num_speakers=args.num_speakers,
         min_speakers=args.min_speakers,
         max_speakers=args.max_speakers,
+        diarize=not args.no_diarize,
     )
+    job_id = snapshot["job_id"]
+    where = args.server or "local"
     print(
-        f"job {job.id}: whisper-{job.whisper_model}, pyannote-{job.diarizer_model}",
+        f"job {job_id} ({where}): whisper-{snapshot['whisper_model']}"
+        + (
+            f", pyannote-{snapshot['diarizer_model']}"
+            if snapshot["diarizer_model"]
+            else ""
+        ),
         file=sys.stderr,
     )
 
     last = None
-    while not job.finished.wait(1.0):
-        state = (job.status, job.segments_done, job.segments_total)
+    while snapshot["status"] not in FINISHED:
+        snapshot = backend.wait(job_id, 5)
+        state = (
+            snapshot["status"],
+            snapshot["segments_done"],
+            snapshot["segments_total"],
+        )
         if state != last:
-            progress = (
-                f" {job.segments_done}/{job.segments_total}"
-                if job.segments_total
-                else ""
-            )
+            total = snapshot["segments_total"]
+            progress = f" {snapshot['segments_done']}/{total}" if total else ""
             print(
-                f"\r{job.status.value}{progress}   ",
+                f"\r{snapshot['status']}{progress}   ",
                 end="",
                 file=sys.stderr,
                 flush=True,
@@ -93,21 +117,17 @@ def main(argv: list[str] | None = None) -> int:
             last = state
     print(file=sys.stderr)
 
-    if job.status is JobStatus.FAILED:
-        print(f"failed: {job.error}", file=sys.stderr)
+    if snapshot["status"] in {JobStatus.FAILED.value, JobStatus.INTERRUPTED.value}:
+        print(f"failed: {snapshot['error']}", file=sys.stderr)
         return 1
 
-    result = service.get_result(job.id)
+    result = backend.get_result(job_id)
     text = format_transcript(result.utterances)
     if args.output:
         args.output.write_text(text + "\n", encoding="utf-8")
     else:
         print(text)
-    print(
-        f"done in {result.elapsed_seconds:.0f}s; JSON saved to "
-        f"{config.output_dir / (job.id + '.json')}",
-        file=sys.stderr,
-    )
+    print(f"done in {result.elapsed_seconds:.0f}s (job {job_id})", file=sys.stderr)
     return 0
 
 

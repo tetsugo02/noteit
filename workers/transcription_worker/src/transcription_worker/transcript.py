@@ -13,7 +13,7 @@ DEFAULT_MAX_GAP_SECONDS = 2.0
 
 
 class Utterance(BaseModel):
-    speaker_label: str
+    speaker_label: str | None = None
     start_time_seconds: float
     end_time_seconds: float
     text: str
@@ -85,6 +85,11 @@ def format_transcript(
     names = speaker_names or {}
     return "\n".join(
         f"[{format_timestamp(u.start_time_seconds)}] "
-        f"{names.get(u.speaker_label, u.speaker_label)}: {u.text}"
+        + (
+            f"{names.get(u.speaker_label, u.speaker_label)}: "
+            if u.speaker_label
+            else ""
+        )
+        + u.text
         for u in utterances
     )

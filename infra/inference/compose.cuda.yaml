@@ -1,0 +1,14 @@
+services:
+  inference:
+    build:
+      dockerfile: infra/inference/Dockerfile.cuda
+    environment:
+      NOTEIT_DEVICE: cuda
+      NOTEIT_DIARIZER_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

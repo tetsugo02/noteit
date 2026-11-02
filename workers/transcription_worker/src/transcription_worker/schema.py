@@ -22,4 +22,6 @@ class SpeakerAssignedWord(BaseModel):
     start_time_seconds: float = Field(ge=0.0)
     end_time_seconds: float = Field(ge=0.0)
     probablility: float | None = Field(ge=0.0, le=1.0)
-    speaker_label: str = Field(..., description="Label of the speaker")
+    speaker_label: str | None = Field(
+        None, description="Null when diarization is disabled"
+    )

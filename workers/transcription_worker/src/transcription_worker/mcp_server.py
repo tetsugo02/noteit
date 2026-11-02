@@ -19,13 +19,8 @@ from dotenv import load_dotenv
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import Field
 
-from .models import (
-    DIARIZER_MODEL_INFO,
-    WHISPER_MODEL_INFO,
-    DiarizerModelType,
-    WhisperModelType,
-)
-from .service import JobStatus, ServiceConfig, TranscriptionService
+from .backends import FINISHED, TranscriptionBackend
+from .models import DiarizerModelType, WhisperModelType
 from .transcript import format_timestamp, format_transcript
 
 MAX_WAIT_SECONDS = 50
@@ -33,7 +28,7 @@ MAX_WAIT_SECONDS = 50
 server = MCPServer(
     name="noteit",
     instructions=(
-        "Transcribes local meeting recordings with speaker diarization "
+        "Transcribes local meeting recordings with optional speaker diarization "
         "(pyannote + Whisper). Call start_transcription, then call "
         "wait_for_transcription repeatedly until status is 'done', then "
         "get_transcript. Pick a lighter whisper_model (small/base) on machines "
@@ -42,34 +37,23 @@ server = MCPServer(
     ),
 )
 
-_service: TranscriptionService | None = None
+_backend: TranscriptionBackend | None = None
 
 
-def get_service() -> TranscriptionService:
-    global _service
-    if _service is None:
-        _service = TranscriptionService(ServiceConfig.from_env())
-    return _service
+def get_backend() -> TranscriptionBackend:
+    """Connect to the shared desktop service, starting it lazily if necessary."""
+    global _backend
+    if _backend is None:
+        from .frontend_client import FrontendBackend
+
+        _backend = FrontendBackend()
+    return _backend
 
 
 @server.tool()
 def list_models() -> dict[str, Any]:
-    """List selectable Whisper / diarization models and the server defaults."""
-    config = get_service().config
-    return {
-        "whisper_models": [
-            {"name": m.value, "parameters": i.parameters, "note": i.note}
-            for m, i in WHISPER_MODEL_INFO.items()
-        ],
-        "diarizer_models": [
-            {"name": m.value, "note": i.note} for m, i in DIARIZER_MODEL_INFO.items()
-        ],
-        "defaults": {
-            "whisper_model": config.whisper_model.value,
-            "diarizer_model": config.diarizer_model.value,
-            "device": config.device,
-        },
-    }
+    """List selectable Whisper / diarization models, defaults, and where they run."""
+    return get_backend().describe()
 
 
 @server.tool()
@@ -82,8 +66,10 @@ def start_transcription(
     ],
     language: Annotated[
         str | None,
-        Field(description="ISO 639-1 code such as 'ja' or 'en'. null = auto-detect."),
-    ] = "ja",
+        Field(
+            description="ISO code such as ja/en; auto = detect; null/omitted = shared setting."
+        ),
+    ] = None,
     whisper_model: Annotated[
         WhisperModelType | None,
         Field(
@@ -102,9 +88,12 @@ def start_transcription(
     ] = None,
     min_speakers: Annotated[int | None, Field(ge=1)] = None,
     max_speakers: Annotated[int | None, Field(ge=1)] = None,
+    diarize: bool = False,
+    target: str | None = None,
+    device: str | None = None,
 ) -> dict[str, Any]:
     """Start transcribing a recording in the background and return its job_id."""
-    job = get_service().submit(
+    return get_backend().submit(
         audio_path,
         language=language,
         whisper_model=whisper_model,
@@ -112,8 +101,10 @@ def start_transcription(
         num_speakers=num_speakers,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
+        diarize=diarize,
+        **({"target": target} if target else {}),
+        **({"device": device} if device else {}),
     )
-    return job.snapshot()
 
 
 @server.tool()
@@ -130,36 +121,27 @@ async def wait_for_transcription(
     ] = 30,
 ) -> dict[str, Any]:
     """Wait up to wait_seconds for a job, reporting progress, and return its status."""
-    service = get_service()
-    job = service.get_job(job_id)
-    if job is None:
-        raise ValueError(f"Unknown job_id: {job_id}")
-
+    backend = get_backend()
     deadline = asyncio.get_running_loop().time() + wait_seconds
-    while not job.finished.is_set():
+    while True:
         remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            break
-        if job.segments_total:
+        snapshot = await asyncio.to_thread(
+            backend.wait, job_id, max(0.0, min(remaining, 5.0))
+        )
+        if snapshot.get("segments_total"):
             await ctx.report_progress(
-                job.segments_done, job.segments_total, f"{job.status.value}"
+                snapshot["segments_done"],
+                snapshot["segments_total"],
+                snapshot["status"],
             )
-        await asyncio.to_thread(job.finished.wait, min(remaining, 2.0))
-    return job.snapshot()
+        if snapshot["status"] in FINISHED or remaining <= 5.0:
+            return snapshot
 
 
 @server.tool()
 def list_transcriptions() -> list[dict[str, Any]]:
     """List jobs in this session and transcripts saved by earlier sessions."""
-    service = get_service()
-    jobs = [job.snapshot() for job in service.list_jobs()]
-    known = {job["job_id"] for job in jobs}
-    saved = [
-        {"job_id": path.stem, "status": JobStatus.DONE.value, "saved_to": str(path)}
-        for path in service.list_saved_results()
-        if path.stem not in known
-    ]
-    return jobs + saved
+    return get_backend().list_jobs()
 
 
 @server.tool()
@@ -171,15 +153,54 @@ def get_transcript(
     ] = None,
 ) -> str:
     """Return the speaker-labelled transcript of a finished job as plain text."""
-    result = get_service().get_result(job_id)
+    result = get_backend().get_result(job_id)
     duration = result.utterances[-1].end_time_seconds if result.utterances else 0.0
+    diarizer = (
+        f", pyannote-{result.diarizer_model.value}" if result.diarizer_model else ""
+    )
     header = (
         f"# Transcript {result.job_id}\n"
         f"audio: {result.audio_path}\n"
         f"duration: {format_timestamp(duration)} / speakers: {', '.join(result.speakers)} / "
-        f"model: whisper-{result.whisper_model.value}, pyannote-{result.diarizer_model.value}\n"
+        f"model: whisper-{result.whisper_model.value}{diarizer}\n"
     )
     return header + "\n" + format_transcript(result.utterances, speaker_names)
+
+
+@server.tool()
+def get_transcription_settings() -> dict:
+    """Read the same settings and remote profiles used by the desktop GUI."""
+    from .frontend_client import FrontendBackend
+
+    backend = get_backend()
+    if not isinstance(backend, FrontendBackend):
+        return {"settings": {}, "profiles": []}
+    return {
+        "settings": backend.request("GET", "/settings"),
+        "profiles": backend.request("GET", "/profiles"),
+    }
+
+
+@server.tool()
+def update_transcription_settings(
+    target: str | None = None,
+    device: str | None = None,
+    whisper_model: WhisperModelType | None = None,
+    language: str | None = None,
+    diarize: bool | None = None,
+) -> dict:
+    """Update desktop defaults. Existing jobs retain their original execution target."""
+    backend = get_backend()
+    current = backend.request("GET", "/settings")
+    updates = dict(
+        target=target,
+        device=device,
+        whisper_model=whisper_model,
+        language=language,
+        diarize=diarize,
+    )
+    current.update({key: value for key, value in updates.items() if value is not None})
+    return backend.request("PUT", "/settings", json=current)
 
 
 @server.prompt()
@@ -188,9 +209,12 @@ def summarize_meeting(job_id: str, speaker_names: str = "") -> str:
     names = dict(pair.split("=", 1) for pair in speaker_names.split(",") if "=" in pair)
     transcript = get_transcript(job_id, names or None)
     return (
-        "以下は話者分離付きの会議の文字起こしです。音声認識の誤りが含まれる前提で、"
-        "文脈から補って読んでください。\n\n"
-        "次の形式で日本語の議事録を作成してください。\n"
+        "以下は話者分離付きの会議の文字起こしです．音声認識の誤りが含まれます．"
+        "不明瞭な専門用語や発言内容を推測で確定せず，要確認と明示してください．"
+        "SPEAKER_UNKNOWNは話者不明として扱い，人物名を推測しないでください．"
+        "決定事項・TODO・担当者・期限は発言に根拠があるものだけ記載し，"
+        "不明な項目は不明としてください．\n\n"
+        "次の形式で日本語の議事録を作成してください．\n"
         "1. 概要（3行以内）\n"
         "2. 議題ごとの議論内容（誰が何を主張したか）\n"
         "3. 決定事項\n"

@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-import torch
-
 
 class WhisperModelType(StrEnum):
     """Stable Whisper model names, ordered from lightest to heaviest."""
@@ -25,12 +23,12 @@ class DiarizerModelType(StrEnum):
 
 
 WHISPER_MODEL_IDS: dict[WhisperModelType, str] = {
-    WhisperModelType.TINY: "openai/whisper-tiny",
-    WhisperModelType.BASE: "openai/whisper-base",
-    WhisperModelType.SMALL: "openai/whisper-small",
-    WhisperModelType.MEDIUM: "openai/whisper-medium",
-    WhisperModelType.TURBO: "openai/whisper-large-v3-turbo",
-    WhisperModelType.LARGE: "openai/whisper-large-v3",
+    WhisperModelType.TINY: "tiny",
+    WhisperModelType.BASE: "base",
+    WhisperModelType.SMALL: "small",
+    WhisperModelType.MEDIUM: "medium",
+    WhisperModelType.TURBO: "turbo",
+    WhisperModelType.LARGE: "large-v3",
 }
 
 DIARIZER_MODEL_IDS: dict[DiarizerModelType, str] = {
@@ -65,11 +63,25 @@ DIARIZER_MODEL_INFO: dict[DiarizerModelType, ModelInfo] = {
     DiarizerModelType.STANDARD: ModelInfo("-", "pyannote 3.1. Older pipeline."),
 }
 
-DEVICE_CHOICES = ("auto", "cuda", "mps", "cpu")
+DEVICE_CHOICES = ("auto", "mlx", "cuda", "cpu")
 
 
 def resolve_device(requested: str = "auto", *, allow_mps: bool = True) -> str:
     """Pick a torch device. ``auto`` prefers CUDA, then Apple MPS, then CPU."""
+    if requested == "cpu":
+        return "cpu"
+    try:
+        import torch
+    except ImportError:
+        import ctranslate2
+
+        cuda = ctranslate2.get_cuda_device_count() > 0
+        if requested == "auto":
+            return "cuda" if cuda else "cpu"
+        if requested.startswith("cuda") and cuda:
+            return requested
+        raise RuntimeError(f"Device unavailable: {requested}")
+
     if requested == "auto":
         if torch.cuda.is_available():
             return "cuda"
@@ -86,6 +98,52 @@ def resolve_device(requested: str = "auto", *, allow_mps: bool = True) -> str:
 
 def default_whisper_model() -> WhisperModelType:
     """Turbo on CUDA machines, small elsewhere (e.g. a MacBook)."""
-    return (
-        WhisperModelType.TURBO if torch.cuda.is_available() else WhisperModelType.SMALL
-    )
+    try:
+        import ctranslate2
+
+        cuda = ctranslate2.get_cuda_device_count() > 0
+    except (ImportError, RuntimeError):
+        cuda = False
+    return WhisperModelType.TURBO if cuda else WhisperModelType.SMALL
+
+
+def recognition_device(requested: str = "auto") -> tuple[str, str]:
+    """Resolve an engine without importing inference libraries on the frontend."""
+    import platform
+    import importlib.util
+
+    apple = platform.system() == "Darwin" and platform.machine() == "arm64"
+    mlx_available = importlib.util.find_spec("mlx_whisper") is not None
+    if requested == "mlx" or (requested == "auto" and apple and mlx_available):
+        if not apple or not mlx_available:
+            raise RuntimeError(
+                "Apple GPU requires Apple Silicon and the mac-gpu extra."
+            )
+        return "mlx-whisper", "mlx"
+    return "faster-whisper", resolve_device(requested, allow_mps=False)
+
+
+def engine_capabilities() -> dict:
+    import importlib.util
+    import platform
+
+    apple = platform.system() == "Darwin" and platform.machine() == "arm64"
+    # CTranslate2 can probe CUDA without loading model weights or torch.
+    devices = []
+    if importlib.util.find_spec("faster_whisper"):
+        devices.append("cpu")
+        try:
+            import ctranslate2
+
+            if ctranslate2.get_cuda_device_count():
+                devices.append("cuda")
+        except (ImportError, RuntimeError):
+            pass
+    engines = [{"name": "faster-whisper", "devices": devices}] if devices else []
+    if apple and importlib.util.find_spec("mlx_whisper"):
+        engines.append({"name": "mlx-whisper", "devices": ["mlx"]})
+    return {
+        "engines": engines,
+        "devices": [device for engine in engines for device in engine["devices"]],
+        "diarization": importlib.util.find_spec("pyannote") is not None,
+    }

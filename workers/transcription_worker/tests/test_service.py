@@ -6,6 +6,7 @@ import pytest
 from mcp import Client
 from pydub import AudioSegment
 from transcription_worker import mcp_server
+from transcription_worker.backends import LocalBackend
 from transcription_worker.models import DiarizerModelType, WhisperModelType
 from transcription_worker.schema import SpeakerAssignedWord, SpeakerSegment
 from transcription_worker.service import (
@@ -120,7 +121,7 @@ def test_get_result_rejects_path_like_job_ids(service) -> None:
 @pytest.mark.anyio
 async def test_mcp_tools_end_to_end(service, audio_path, monkeypatch) -> None:
     svc, _, _ = service
-    monkeypatch.setattr(mcp_server, "_service", svc)
+    monkeypatch.setattr(mcp_server, "_backend", LocalBackend(svc))
 
     async with Client(mcp_server.server) as client:
         tools = {tool.name for tool in (await client.list_tools()).tools}
@@ -134,7 +135,7 @@ async def test_mcp_tools_end_to_end(service, audio_path, monkeypatch) -> None:
 
         started = await client.call_tool(
             "start_transcription",
-            {"audio_path": str(audio_path), "whisper_model": "tiny"},
+            {"audio_path": str(audio_path), "whisper_model": "tiny", "diarize": True},
         )
         assert not started.is_error, started.content
         job_id = started.structured_content["job_id"]

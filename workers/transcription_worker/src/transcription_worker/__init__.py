@@ -5,7 +5,17 @@ import warnings
 warnings.filterwarnings("ignore", message=r"\s*torchcodec is not installed correctly")
 
 from .schema import SpeakerAssignedWord, SpeakerSegment, TranscribedWord  # noqa: E402
-from .worker import ProgressCallback, TranscriptionWorker  # noqa: E402
+
+
+def __getattr__(name):
+    # Preserve the public import API without loading optional audio packages for
+    # remote-only desktop/MCP clients.
+    if name in {"ProgressCallback", "TranscriptionWorker"}:
+        from . import worker
+
+        return getattr(worker, name)
+    raise AttributeError(name)
+
 
 __all__ = [
     "ProgressCallback",

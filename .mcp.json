@@ -2,7 +2,7 @@
   "mcpServers": {
     "noteit": {
       "command": "uv",
-      "args": ["run", "--directory", "workers/transcription_worker", "noteit-mcp"],
+      "args": ["run", "--frozen", "--directory", "workers/transcription_worker", "noteit-mcp"],
       "env": {
         "NOTEIT_WHISPER_MODEL": "small"
       }

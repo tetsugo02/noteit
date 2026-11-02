@@ -1,60 +1,88 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
-import soundfile
+from transcription_worker.models import WhisperModelType
 from transcription_worker.whisper import Whisper
 
 
-def make_whisper(raw_result: object) -> Whisper:
+def test_full_recording_uses_vad_and_keeps_global_word_timestamps(tmp_path):
+    audio = tmp_path / "audio.wav"
+    audio.touch()
     whisper = Whisper.__new__(Whisper)
-    whisper.pipe = Mock(return_value=raw_result)
-    whisper.is_compiled = False
-    return whisper
-
-
-def test_transcribe_returns_current_worker_schema(tmp_path: Path) -> None:
-    audio_path = tmp_path / "audio.wav"
-    soundfile.write(audio_path, np.zeros((1600, 2), dtype="float32"), 16_000)
-    whisper = make_whisper(
-        {
-            "text": " hello world",
-            "chunks": [
-                {"text": " hello", "timestamp": (0.0, 0.5)},
-                {"text": " world", "timestamp": (0.5, 1.0)},
-            ],
-        }
+    whisper.model = Mock()
+    whisper.model.transcribe.return_value = (
+        iter(
+            [
+                SimpleNamespace(
+                    end=42.5,
+                    words=[
+                        SimpleNamespace(
+                            word=" hello", start=42.0, end=42.5, probability=0.9
+                        ),
+                    ],
+                ),
+                SimpleNamespace(end=50.0, words=None),
+            ]
+        ),
+        SimpleNamespace(duration=60.0),
     )
+    progress = Mock()
 
-    result = whisper.transcribe(audio_path, language="en")
+    result = whisper.transcribe(audio, language="en", on_progress=progress)
 
-    assert [word.word for word in result] == ["hello", "world"]
-    assert result[0].start_time_seconds == 0.0
-    assert result[1].end_time_seconds == 1.0
-    assert result[0].probablility is None
-    whisper.pipe.assert_called_once()  # type: ignore
-    audio = whisper.pipe.call_args.args[0]  # type: ignore
-    assert audio["sampling_rate"] == 16_000
-    assert audio["raw"].shape == (1600,)  # stereo downmixed to mono
-    assert whisper.pipe.call_args.kwargs == dict(  # type: ignore
-        return_timestamps="word",
-        decoder_kwargs={"clean_up_tokenization_spaces": False},
-        language="en",
-    )
+    assert result[0].word == "hello"
+    assert result[0].start_time_seconds == 42.0
+    assert result[0].probablility == 0.9
+    assert [call.args[0] for call in progress.call_args_list] == [42.5, 50.0, 60.0]
+    options = whisper.model.transcribe.call_args.kwargs
+    assert options["vad_filter"] and options["word_timestamps"]
+    assert not options["condition_on_previous_text"]
+    assert options["language"] == "en"
+    whisper.model.transcribe.assert_called_once()
 
 
-def test_transcribe_rejects_missing_file(tmp_path: Path) -> None:
-    whisper = make_whisper({"chunks": []})
-
+def test_transcribe_rejects_missing_file(tmp_path: Path):
+    whisper = Whisper.__new__(Whisper)
     with pytest.raises(FileNotFoundError):
         whisper.transcribe(tmp_path / "missing.wav")
 
 
-def test_transcribe_rejects_result_without_word_timestamps(tmp_path: Path) -> None:
-    audio_path = tmp_path / "audio.wav"
-    soundfile.write(audio_path, np.zeros(1600, dtype="float32"), 16_000)
-    whisper = make_whisper({"text": "hello"})
+def test_silence_returns_no_words_and_completes_progress(tmp_path):
+    audio = tmp_path / "silence.wav"
+    audio.touch()
+    whisper = Whisper.__new__(Whisper)
+    whisper.model = Mock()
+    whisper.model.transcribe.return_value = (iter([]), SimpleNamespace(duration=30.0))
+    progress = Mock()
 
-    with pytest.raises(ValueError, match="word timestamps"):
-        whisper.transcribe(audio_path)
+    assert whisper.transcribe(audio, on_progress=progress) == []
+    progress.assert_called_once_with(30.0)
+
+
+@pytest.mark.parametrize(
+    "device, resolved, backend, index, precision",
+    [
+        ("auto", "cpu", "cpu", 0, "int8"),
+        ("cuda:2", "cuda:2", "cuda", 2, "float16"),
+    ],
+)
+def test_model_device_selection(
+    monkeypatch, device, resolved, backend, index, precision
+):
+    monkeypatch.setattr(
+        "transcription_worker.whisper.resolve_device", Mock(return_value=resolved)
+    )
+    factory = Mock()
+    monkeypatch.setattr("transcription_worker.whisper.WhisperModel", factory)
+    Whisper(model_type=WhisperModelType.LARGE, device=device)
+    assert factory.call_args.args == ("large-v3",)
+    assert factory.call_args.kwargs["device"] == backend
+    assert factory.call_args.kwargs["device_index"] == index
+    assert factory.call_args.kwargs["compute_type"] == precision
+
+
+def test_mps_reports_supported_devices():
+    with pytest.raises(ValueError, match="does not support MPS"):
+        Whisper(device="mps")
