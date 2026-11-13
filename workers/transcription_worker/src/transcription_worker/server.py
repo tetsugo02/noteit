@@ -9,6 +9,7 @@ server can connect to its localhost ports.
 
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import secrets
 import shutil
@@ -22,6 +23,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .backends import model_catalog
 from .models import DiarizerModelType, WhisperModelType
+from .process_service import ProcessTranscriptionService
 from .service import JobStatus, ServiceConfig, TranscriptionService
 
 MAX_WAIT_SECONDS = 60
@@ -34,7 +36,14 @@ def create_app(
     if not token:
         raise ValueError("An API token is required.")
 
-    app = FastAPI(title="noteit transcription server")
+    @asynccontextmanager
+    async def lifespan(_app):
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(service.close)
+
+    app = FastAPI(title="noteit transcription server", lifespan=lifespan)
     bearer = HTTPBearer(auto_error=False)
     upload_dir = service.config.output_dir.parent / "uploads"
     for directory in (service.config.output_dir, upload_dir):
@@ -186,8 +195,13 @@ def main() -> None:
 
     import uvicorn
 
-    service = TranscriptionService(ServiceConfig.from_env())
-    uvicorn.run(create_app(service, token), host=args.host, port=args.port)
+    service = ProcessTranscriptionService(ServiceConfig.from_env())
+    uvicorn.run(
+        create_app(service, token),
+        host=args.host,
+        port=args.port,
+        timeout_graceful_shutdown=5,
+    )
 
 
 if __name__ == "__main__":

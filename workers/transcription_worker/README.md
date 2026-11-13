@@ -15,4 +15,8 @@ result = service.get_result(job.id)
 
 `TranscriptionWorker`を直接使う場合は，`diarizer=None`でWhisper単独認識できます．認識は音声全体を一度だけ実行し，単語を元の音声上の時刻とともに返します．`group_utterances`と`format_transcript`は話者ラベルnullと従来のラベル付き結果に対応しています．
 
-デスクトップの`frontend`は設定・履歴・接続先をSQLiteで管理し，認証情報をmacOS Keychainから取得します．GUIはRust経由，MCPは`FrontendBackend`経由で同一サービスを呼び出します．ローカル推論はジョブごとの別プロセス`local_process`で行い，フロントにはモデルを読み込みません．モデルファイルはキャッシュしますが，ローカルのプロセス終了後に重みのメモリは保持しません．推論サーバーと直接CLIではプロセス内のモデルを再利用します．
+デスクトップの`frontend`は設定・履歴・接続先をSQLiteで管理し，認証情報をmacOS Keychainから取得します．GUIはRust経由，MCPは`FrontendBackend`経由で同一サービスを呼び出します．ローカル推論はジョブごとの別プロセス`local_process`で行い，フロントにはモデルを読み込みません．モデルファイルはキャッシュしますが，ローカルのプロセス終了後に重みのメモリは保持しません．
+
+HTTP推論サーバーは`ProcessTranscriptionService`を使い，ジョブごとに`inference_process`を起動します．子プロセスが終了してから結果を公開し，成功・失敗・サーバー停止時にモデルとVRAMを解放します．モデルのディスクキャッシュは再利用しますが，毎回メモリへの読み込みが発生します．待受プロセスには推論ライブラリをimportせず，モデルも保持しません．子プロセス用のSQLite・結果・デコード音声はジョブ専用の一時ディレクトリへ保存し，終了後に削除します．永続的なジョブ情報・結果は親プロセスが保存します．
+
+直接CLIと，Pythonから直接使う`TranscriptionService`はプロセス内のモデルを再利用します．

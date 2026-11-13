@@ -1,9 +1,10 @@
-"""Job queue and model cache shared by the MCP server and the CLI.
+"""In-process transcription queue, model cache and durable results.
 
 Models are loaded lazily and kept in memory between jobs. Requesting a
 different model size swaps only the component that changed. Jobs run one at a
 time on a background thread, and finished results are written to disk so they
-survive a server restart.
+survive a service restart. The HTTP server uses ProcessTranscriptionService
+instead, with a fresh instance of this engine inside each short-lived child.
 """
 
 from __future__ import annotations
@@ -309,6 +310,9 @@ class TranscriptionService:
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True)
 
     # ---- internals ------------------------------------------------------
 
