@@ -1,5 +1,7 @@
 services:
   inference:
+    # The pinned TorchCodec CPU wheel is available for Linux x86_64 only.
+    platform: linux/amd64
     build:
       context: ../..
       dockerfile: infra/inference/Dockerfile

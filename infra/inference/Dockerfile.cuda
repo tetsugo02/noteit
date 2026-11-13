@@ -1,4 +1,5 @@
 # CTranslate2 4.8 uses CUDA 12 and cuDNN 9.
+# Build with --platform=linux/amd64; Compose selects this automatically.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 ENV PYTHONUNBUFFERED=1 UV_LINK_MODE=copy NOTEIT_HOST=0.0.0.0 NOTEIT_PORT=8765 NOTEIT_DEVICE=cuda NOTEIT_DIARIZER_DEVICE=cuda NOTEIT_OUTPUT_DIR=/data/transcripts HF_HOME=/data/models NOTEIT_TEMP_DIR=/data/temporary
 RUN apt-get update && apt-get install -y --no-install-recommends python3.12 python3.12-venv ffmpeg libsndfile1 ca-certificates && rm -rf /var/lib/apt/lists/*
