@@ -1,15 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use serde::Deserialize;
 use serde_json::Value;
-use std::{
-    process::Command,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     Manager, State,
 };
+
+mod startup;
 
 #[derive(Clone, Deserialize)]
 struct Endpoint {
@@ -148,23 +147,24 @@ fn main() {
         .setup(|app| {
             let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../../workers/transcription_worker");
-            let mut command = if let Ok(python) = std::env::var("NOTEIT_PYTHON") {
-                let mut cmd = Command::new(python);
-                cmd.args(["-m", "transcription_worker.frontend", "ensure"]);
-                cmd.current_dir(&project);
-                cmd
-            } else {
-                let mut cmd = Command::new("uv");
-                cmd.args(["run", "--frozen", "--directory"]);
-                cmd.arg(&project);
-                cmd.args(["noteit-front", "ensure"]);
-                cmd
+            let home = app.path().home_dir().ok();
+            let endpoint = match startup::ensure_frontend(
+                &project,
+                std::env::var_os("NOTEIT_PYTHON"),
+                startup::uv_candidates(home.as_deref()),
+            ) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    eprintln!("{error}");
+                    rfd::MessageDialog::new()
+                        .set_title("noteitを起動できませんでした")
+                        .set_description(&error)
+                        .set_level(rfd::MessageLevel::Error)
+                        .show();
+                    app.handle().exit(1);
+                    return Ok(());
+                }
             };
-            let output = command.output()?;
-            if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).to_string().into());
-            }
-            let endpoint: Endpoint = serde_json::from_slice(&output.stdout)?;
             app.manage(Desktop {
                 endpoint,
                 quitting: AtomicBool::new(false),
@@ -249,7 +249,10 @@ fn main() {
             }
 
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if !app.state::<Desktop>().quitting.load(Ordering::SeqCst) {
+                if app
+                    .try_state::<Desktop>()
+                    .is_some_and(|state| !state.quitting.load(Ordering::SeqCst))
+                {
                     api.prevent_exit();
                 }
             }

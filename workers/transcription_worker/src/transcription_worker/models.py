@@ -96,15 +96,39 @@ def resolve_device(requested: str = "auto", *, allow_mps: bool = True) -> str:
     return requested
 
 
+def _cuda_available() -> bool:
+    """Probe the NVIDIA driver without importing CTranslate2 and its converters.
+
+    Importing CTranslate2 also imports torch when it is installed. Keep catalog
+    requests and default selection independent of that expensive initialization.
+    """
+    import os
+    import shutil
+    import subprocess
+
+    if os.environ.get("CUDA_VISIBLE_DEVICES") in {"", "-1"}:
+        return False
+    if os.environ.get("NVIDIA_VISIBLE_DEVICES") in {"", "none", "void"}:
+        return False
+    executable = shutil.which("nvidia-smi")
+    if not executable:
+        return False
+    try:
+        result = subprocess.run(
+            [executable, "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def default_whisper_model() -> WhisperModelType:
     """Turbo on CUDA machines, small elsewhere (e.g. a MacBook)."""
-    try:
-        import ctranslate2
-
-        cuda = ctranslate2.get_cuda_device_count() > 0
-    except (ImportError, RuntimeError):
-        cuda = False
-    return WhisperModelType.TURBO if cuda else WhisperModelType.SMALL
+    return WhisperModelType.TURBO if _cuda_available() else WhisperModelType.SMALL
 
 
 def recognition_device(requested: str = "auto") -> tuple[str, str]:
@@ -128,17 +152,11 @@ def engine_capabilities() -> dict:
     import platform
 
     apple = platform.system() == "Darwin" and platform.machine() == "arm64"
-    # CTranslate2 can probe CUDA without loading model weights or torch.
     devices = []
     if importlib.util.find_spec("faster_whisper"):
         devices.append("cpu")
-        try:
-            import ctranslate2
-
-            if ctranslate2.get_cuda_device_count():
-                devices.append("cuda")
-        except (ImportError, RuntimeError):
-            pass
+        if _cuda_available():
+            devices.append("cuda")
     engines = [{"name": "faster-whisper", "devices": devices}] if devices else []
     if apple and importlib.util.find_spec("mlx_whisper"):
         engines.append({"name": "mlx-whisper", "devices": ["mlx"]})

@@ -38,6 +38,14 @@ GUIは初期状態で「このMac」「small」「話者分離OFF」です．音
 
 開発起動のTauriは`uv run --frozen --directory workers/transcription_worker noteit-front ensure`でPythonサービスを起動・再利用します．別のPython環境を使う場合は，パッケージをインストールしたPythonの絶対パスを`NOTEIT_PYTHON`に指定してください．推論ライブラリを追加・更新した際はトレイから明示終了し，再起動してください．
 
+Finderから起動するローカル用の`.app`は，リポジトリのルートで次のコマンドを実行して作成できます．出力先は`apps/desktop/src-tauri/target/debug/bundle/macos/noteit.app`です．このアプリもビルド時のリポジトリ内にあるPythonサービスを参照するため，リポジトリの移動後は再ビルドしてください．Python環境は別途必要で，配布用の自己完結したアプリではありません．
+
+```sh
+npm --prefix apps/desktop run tauri -- build --debug --bundles app --config '{"bundle":{"active":true}}'
+```
+
+Finderからの起動ではシェルのPATHを引き継がないため，PATH上に`uv`がなければ`~/.local/bin`，`~/.cargo/bin`，Homebrewの標準インストール先も探索します．共通サービスの起動前に失敗した場合は，エラー内容をダイアログに表示して終了します．Pythonサービスが起動した後の診断は`service.log`を参照してください．
+
 ## 設定と終了
 
 GUIの「設定と接続先」で，複数サーバーの名前・URL・APIトークンを登録できます．「接続テスト」は**保存済み**のプロファイルに対し認証とモデル・デバイス・話者分離対応を確認します．「既定の設定を保存」で実行先などの選択をMCPにも共有します．GUIは保存された設定と履歴を定期的に読み直します．未保存の編集中は設定の再読み込みを保留します．
@@ -90,6 +98,8 @@ CLIは共有デスクトップサービスを経由せず，直接ローカル�
 
 LinuxのDocker EngineとComposeを用意してください．研究室LAN／VPN内で使用し，公開するホスト側IPを指定します．MacのApple GPUはDocker外で使用します．
 
+現在の固定依存はLinux x86_64（`linux/amd64`）を対象とし，Composeでもこのプラットフォームを指定しています．TorchCodec 0.10.0のCPU版にはLinux ARM64用wheelがないため，Apple SiliconのDocker Desktopではamd64エミュレーションで実行します．Linux ARM64のネイティブ実行は対象外です．Dockerfileを直接ビルドする場合も`docker build --platform=linux/amd64`を指定してください．
+
 ```sh
 cd infra/inference
 cp .env.example .env
@@ -100,6 +110,7 @@ chmod 600 .env
 
 docker compose up -d --build
 docker compose ps
+# NOTEIT_BIND_IPを変更した場合は，次のIPも同じ値へ置き換えてください
 curl http://127.0.0.1:8765/health
 ```
 
@@ -116,6 +127,32 @@ CPUイメージはPython 3.12.12，CUDAイメージは`nvidia/cuda:12.8.1-cudnn-
 サーバーは単一ユーザー・単一ワーカー・同時推論1件です．モデルキャッシュ，結果JSON，SQLiteのジョブ情報を`noteit-data`ボリュームの`/data`に保持します．再起動しても完了結果を取得できます．実行途中だったジョブは`interrupted`になり，手動再投入が必要です．アップロード音声は成功・失敗のいずれでも処理終了後に削除し，起動時に残ったアップロードとデコード用一時ファイルを削除します．ユーザーが選んだ元ファイルは削除しません．ヘルスチェックと`unless-stopped`を設定しています．
 
 更新時はリポジトリを更新後，使用中と同じCompose引数で`up -d --build`を実行してください．停止は`docker compose down`です．データを残すため`down -v`は使わないでください．
+
+### Tailscale経由でMacから接続
+
+MacとLinuxサーバーを同じtailnetに参加させます．サーバーにはホストOS側へTailscaleをインストールしてください．[Linuxの導入手順](https://tailscale.com/docs/install/linux)に従って接続し，サーバーで次を実行してIPv4アドレスを確認します．
+
+```sh
+sudo tailscale up
+tailscale ip -4
+```
+
+表示されたサーバーのTailscale IPを`infra/inference/.env`の`NOTEIT_BIND_IP`へ設定します．以下の`100.101.102.103`は例なので，実際の値へ置き換えてください．`NOTEIT_API_TOKEN`も設定したうえで，上記のCPUまたはCUDA構成の起動コマンドを実行します．Tailscale接続後に起動してください．
+
+```dotenv
+NOTEIT_BIND_IP=100.101.102.103
+NOTEIT_PORT=8765
+```
+
+MacのTailscaleを接続状態にし，ターミナルで確認します．
+
+```sh
+curl --connect-timeout 10 http://100.101.102.103:8765/health
+```
+
+GUIの「設定と接続先」にURL `http://100.101.102.103:8765`とサーバーのAPIトークンを登録し，保存後に接続テストを実行します．文字起こし画面でその接続先を選び，MCPでも既定にする場合は「既定の設定を保存」を実行してください．この構成ではSSHトンネルは不要です．Tailscale IP宛ての通信は[Tailscaleが暗号化](https://tailscale.com/docs/secure-networks)します．
+
+tailnetのアクセス制御を制限している場合は，MacからサーバーのTCP 8765番へ接続できる[ACL／grants](https://tailscale.com/docs/features/access-control/acls)を設定してください．ホストのファイアウォールでも必要な通信を許可します．サーバーでの確認も`127.0.0.1`ではなく，設定したTailscale IP宛てに行ってください．
 
 ## 検証
 

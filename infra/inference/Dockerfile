@@ -1,3 +1,4 @@
+# Build with --platform=linux/amd64; Compose selects this automatically.
 FROM python:3.12.12-slim-bookworm AS cpu
 ENV PYTHONUNBUFFERED=1 UV_LINK_MODE=copy NOTEIT_HOST=0.0.0.0 NOTEIT_PORT=8765 NOTEIT_DEVICE=cpu NOTEIT_DIARIZER_DEVICE=cpu NOTEIT_OUTPUT_DIR=/data/transcripts HF_HOME=/data/models NOTEIT_TEMP_DIR=/data/temporary
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 && rm -rf /var/lib/apt/lists/*
