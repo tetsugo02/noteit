@@ -32,6 +32,7 @@ from transcription_worker.service import (
 )
 from transcription_worker.transcript import format_transcript
 from .test_service import service as service, audio_path as audio_path
+from .test_process_service import isolated as isolated
 
 
 class MemorySecrets:
@@ -148,6 +149,163 @@ def test_local_shutdown_terminates_process_and_marks_job(front, tmp_path, monkey
     assert children[0].poll() is not None
     assert front.get_job(job["job_id"])["status"] == "interrupted"
     assert audio.exists()  # only private copies may be removed
+
+
+def test_cancel_local_active_and_queued_jobs(front, tmp_path, monkeypatch):
+    real_popen = subprocess.Popen
+    children = []
+
+    def popen(*args, **kwargs):
+        child = real_popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time; sys.stdin.readline(); time.sleep(120)",
+            ],
+            **kwargs,
+        )
+        children.append(child)
+        return child
+
+    monkeypatch.setattr("transcription_worker.frontend.subprocess.Popen", popen)
+    audio = tmp_path / "recording.wav"
+    audio.touch()
+    first = front.submit(Submission(audio_path=str(audio)))
+    second = front.submit(Submission(audio_path=str(audio)))
+    wait_until(lambda: front.process is not None)
+    client = TestClient(create_app(front, "desktop-secret"))
+    assert client.post(f"/jobs/{first['job_id']}/cancel").status_code == 401
+    client.headers["Authorization"] = "Bearer desktop-secret"
+    assert client.post("/jobs/missing/cancel").status_code == 404
+    assert (
+        client.post(f"/jobs/{second['job_id']}/cancel").json()["status"] == "cancelled"
+    )
+    assert children[0].poll() is None
+    assert client.post(f"/jobs/{first['job_id']}/cancel").status_code == 200
+    wait_until(lambda: front.get_job(first["job_id"])["status"] == "cancelled")
+    assert children[0].poll() is not None
+    assert len(children) == 1 and audio.exists()
+    assert front.get_job(first["job_id"])["error"] is None
+    front.close()
+    restored = FrontendService(front.directory, front.credentials)
+    try:
+        assert all(job["status"] == "cancelled" for job in restored.list_jobs())
+    finally:
+        restored.close()
+
+
+def test_gui_cancel_reaches_remote_process_and_allows_new_job(
+    front, isolated, audio_path, tmp_path, monkeypatch
+):
+    from transcription_worker.backends import RemoteBackend
+    from transcription_worker.server import create_app as remote_app
+
+    service, children, _ = isolated
+    gate = tmp_path / "remote-cancel-gate"
+    monkeypatch.setenv("NOTEIT_TEST_INFERENCE_GATE", str(gate))
+    app = remote_app(service, "api-test-token")
+    monkeypatch.setattr(
+        front,
+        "remote",
+        lambda target: RemoteBackend(
+            "http://testserver", "api-test-token", client=TestClient(app)
+        ),
+    )
+    profile = front.save_profile(
+        Profile(name="remote", url="http://testserver", token="api-test-token")
+    )
+    request = Submission(audio_path=str(audio_path), target=profile["id"])
+    job = front.submit(request)
+    wait_until(lambda: front.get_job(job["job_id"])["status"] == "transcribing")
+    original_remote_id = front.get_job(job["job_id"])["remote_id"]
+    front.cancel(job["job_id"])
+    wait_until(lambda: front.get_job(job["job_id"])["status"] == "cancelled")
+    assert service.wait(original_remote_id, 5).status == JobStatus.CANCELLED
+    assert children[0].poll() is not None and service._process is None
+    assert audio_path.exists()
+    gate.touch()
+    new_job = front.submit(request)
+    wait_until(lambda: front.get_job(new_job["job_id"])["status"] == "done")
+    assert front.get_job(new_job["job_id"])["remote_id"] != original_remote_id
+
+
+def test_remote_cancel_survives_connection_loss_and_frontend_restart(
+    front, tmp_path, monkeypatch
+):
+    audio = tmp_path / "recording.wav"
+    audio.touch()
+    profile = front.save_profile(
+        Profile(name="remote", url="http://server", token="secret")
+    )
+    disconnected = threading.Event()
+    backend = Mock()
+    backend.submit.return_value = {"job_id": "originalremote"}
+
+    def wait(*args):
+        disconnected.set()
+        raise httpx.ConnectError("offline")
+
+    backend.wait.side_effect = wait
+    monkeypatch.setattr(front, "remote", lambda target: backend)
+    job = front.submit(Submission(audio_path=str(audio), target=profile["id"]))
+    assert disconnected.wait(5)
+    front.cancel(job["job_id"])
+    assert front.get_job(job["job_id"])["status"] == "cancelling"
+    front.close()
+    recovered = Mock()
+    recovered.wait.return_value = {"job_id": "originalremote", "status": "transcribing"}
+    recovered.cancel.return_value = {
+        "job_id": "originalremote",
+        "status": "cancelled",
+        "error": None,
+    }
+    monkeypatch.setattr(FrontendService, "remote", lambda self, target: recovered)
+    restored = FrontendService(front.directory, front.credentials)
+    try:
+        wait_until(lambda: restored.get_job(job["job_id"])["status"] == "cancelled")
+        recovered.submit.assert_not_called()
+        recovered.cancel.assert_called_once_with("originalremote")
+    finally:
+        restored.close()
+
+
+def test_remote_cancel_is_not_finished_until_server_confirms(
+    front, tmp_path, monkeypatch
+):
+    audio = tmp_path / "recording.wav"
+    audio.touch()
+    profile = front.save_profile(
+        Profile(name="remote", url="http://server", token="secret")
+    )
+    backend = Mock()
+    backend.submit.return_value = {"job_id": "remotejob"}
+    backend.wait.return_value = {"job_id": "remotejob", "status": "transcribing"}
+    backend.cancel.side_effect = RuntimeError(
+        "停止に対応した推論サーバーへ更新してください．"
+    )
+    monkeypatch.setattr(front, "remote", lambda target: backend)
+    job = front.submit(Submission(audio_path=str(audio), target=profile["id"]))
+    wait_until(lambda: front.get_job(job["job_id"]).get("remote_id") == "remotejob")
+    front.cancel(job["job_id"])
+    wait_until(lambda: "更新" in (front.get_job(job["job_id"]).get("error") or ""))
+    assert front.get_job(job["job_id"])["status"] == "cancelling"
+    backend.cancel.side_effect = None
+    backend.cancel.return_value = {
+        "job_id": "remotejob",
+        "status": "cancelled",
+        "error": None,
+    }
+    wait_until(lambda: front.get_job(job["job_id"])["status"] == "cancelled")
+
+
+def test_remote_backend_explains_missing_cancel_endpoint():
+    from fastapi import FastAPI
+    from transcription_worker.backends import RemoteBackend
+
+    client = TestClient(FastAPI())
+    backend = RemoteBackend("http://testserver", "secret", client=client)
+    with pytest.raises(RuntimeError, match="推論サーバーへ更新"):
+        backend.cancel("remotejob")
 
 
 def test_remote_disconnect_resume_and_result_survive_restart(

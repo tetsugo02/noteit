@@ -15,7 +15,12 @@ import time
 from .service import Job, JobStatus, TranscriptionResult, TranscriptionService
 
 PROCESS_STOP_TIMEOUT = 5
-FINISHED = {JobStatus.DONE, JobStatus.FAILED, JobStatus.INTERRUPTED}
+FINISHED = {
+    JobStatus.DONE,
+    JobStatus.FAILED,
+    JobStatus.INTERRUPTED,
+    JobStatus.CANCELLED,
+}
 
 
 def _stop_process(process: subprocess.Popen) -> None:
@@ -39,6 +44,27 @@ class ProcessTranscriptionService(TranscriptionService):
         self._stopping = threading.Event()
         self._process_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
+        self._process_job_id: str | None = None
+
+    def cancel(self, job_id: str) -> Job:
+        with self._process_lock:
+            job = self._require_job(job_id)
+            if job.status in FINISHED:
+                return job
+            job.cancel_requested.set()
+            if job.status == JobStatus.QUEUED:
+                job.status = JobStatus.CANCELLED
+                if job.delete_audio_after:
+                    job.audio_path.unlink(missing_ok=True)
+                job.finished_at = time.time()
+                self._persist(job)
+                job.finished.set()
+            else:
+                job.status = JobStatus.CANCELLING
+                self._persist(job)
+                if self._process_job_id == job_id and self._process:
+                    _stop_process(self._process)
+            return job
 
     def _submit(self, audio_path, **options):
         if self._stopping.is_set():
@@ -46,12 +72,17 @@ class ProcessTranscriptionService(TranscriptionService):
         return super()._submit(audio_path, **options)
 
     def _run(self, job: Job) -> None:
-        job.started_at = time.time()
+        with self._process_lock:
+            if job.finished.is_set():
+                return
+            job.started_at = time.time()
+            job.status = JobStatus.LOADING_MODELS
+            self._persist(job)
         try:
             if self._stopping.is_set():
                 raise RuntimeError("Interrupted by service shutdown")
-            job.status = JobStatus.LOADING_MODELS
-            self._persist(job)
+            if job.cancel_requested.is_set():
+                raise RuntimeError("Cancelled")
             temporary = Path(
                 os.environ.get(
                     "NOTEIT_TEMP_DIR", self.config.output_dir.parent / "temporary"
@@ -85,16 +116,27 @@ class ProcessTranscriptionService(TranscriptionService):
                     job, payload, {**os.environ, "NOTEIT_TEMP_DIR": str(decoded)}
                 )
             # _infer has reaped the process: no model/CUDA context remains alive.
-            job.result = result.model_copy(
-                update={"elapsed_seconds": round(time.time() - job.started_at, 1)}
-            )
-            self._save(job.result)
-            job.status = JobStatus.DONE
+            with self._process_lock:
+                if job.cancel_requested.is_set():
+                    raise RuntimeError("Cancelled")
+                job.result = result.model_copy(
+                    update={"elapsed_seconds": round(time.time() - job.started_at, 1)}
+                )
+                self._save(job.result)
+                job.status = JobStatus.DONE
         except Exception as error:
             job.status = (
-                JobStatus.INTERRUPTED if self._stopping.is_set() else JobStatus.FAILED
+                JobStatus.CANCELLED
+                if job.cancel_requested.is_set()
+                else JobStatus.INTERRUPTED
+                if self._stopping.is_set()
+                else JobStatus.FAILED
             )
-            job.error = f"{type(error).__name__}: {error}"
+            job.error = (
+                None
+                if job.status == JobStatus.CANCELLED
+                else f"{type(error).__name__}: {error}"
+            )
         finally:
             if job.delete_audio_after:
                 job.audio_path.unlink(missing_ok=True)
@@ -106,6 +148,8 @@ class ProcessTranscriptionService(TranscriptionService):
         with self._process_lock:
             if self._stopping.is_set():
                 raise RuntimeError("Interrupted by service shutdown")
+            if job.cancel_requested.is_set():
+                raise RuntimeError("Cancelled")
             process = subprocess.Popen(
                 [sys.executable, "-m", "transcription_worker.inference_process"],
                 stdin=subprocess.PIPE,
@@ -116,6 +160,7 @@ class ProcessTranscriptionService(TranscriptionService):
                 env=environment,
             )
             self._process = process
+            self._process_job_id = job.id
         result = None
         error = None
         try:
@@ -129,14 +174,23 @@ class ProcessTranscriptionService(TranscriptionService):
                     result = TranscriptionResult.model_validate(message["result"])
                     continue
                 status = JobStatus(message["status"])
-                if status not in FINISHED:
-                    job.status = status
-                error = message.get("error") or error
-                for key in ("engine", "device", "segments_done", "segments_total"):
-                    if key in message:
-                        setattr(job, key, message[key])
-                self._persist(job)
+                with self._process_lock:
+                    if not job.cancel_requested.is_set():
+                        if status not in FINISHED:
+                            job.status = status
+                        error = message.get("error") or error
+                        for key in (
+                            "engine",
+                            "device",
+                            "segments_done",
+                            "segments_total",
+                        ):
+                            if key in message:
+                                setattr(job, key, message[key])
+                        self._persist(job)
             code = process.wait()
+            if job.cancel_requested.is_set():
+                raise RuntimeError("Cancelled")
             if self._stopping.is_set():
                 raise RuntimeError("Interrupted by service shutdown")
             if code:
@@ -150,6 +204,7 @@ class ProcessTranscriptionService(TranscriptionService):
             with self._process_lock:
                 _stop_process(process)
                 self._process = None
+                self._process_job_id = None
             for stream in (process.stdin, process.stdout):
                 if stream:
                     with contextlib.suppress(OSError):

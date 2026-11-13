@@ -82,6 +82,8 @@ class JobStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
 
 
 class TranscriptionResult(BaseModel):
@@ -120,6 +122,7 @@ class Job:
     finished_at: float | None = None
     result: TranscriptionResult | None = None
     finished: threading.Event = field(default_factory=threading.Event)
+    cancel_requested: threading.Event = field(default_factory=threading.Event)
 
     def snapshot(self) -> dict[str, Any]:
         now = self.finished_at or time.time()
@@ -167,7 +170,12 @@ class TranscriptionService:
         for (data,) in rows:
             item = json.loads(data)
             status = JobStatus(item["status"])
-            if status not in {JobStatus.DONE, JobStatus.FAILED, JobStatus.INTERRUPTED}:
+            if status not in {
+                JobStatus.DONE,
+                JobStatus.FAILED,
+                JobStatus.INTERRUPTED,
+                JobStatus.CANCELLED,
+            }:
                 status = JobStatus.INTERRUPTED
             job = Job(
                 id=item["job_id"],
@@ -236,6 +244,7 @@ class TranscriptionService:
             if existing is not None and existing.status not in {
                 JobStatus.FAILED,
                 JobStatus.INTERRUPTED,
+                JobStatus.CANCELLED,
             }:
                 return existing
             if self._result_path(job_id).is_file():
@@ -291,7 +300,11 @@ class TranscriptionService:
         if job is not None:
             if job.result is not None:
                 return job.result
-            if job.status in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+            if job.status in {
+                JobStatus.FAILED,
+                JobStatus.INTERRUPTED,
+                JobStatus.CANCELLED,
+            }:
                 raise RuntimeError(f"Job {job_id} failed: {job.error}")
             raise RuntimeError(
                 f"Job {job_id} is not finished yet (status: {job.status})."
