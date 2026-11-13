@@ -48,9 +48,11 @@ Finderからの起動ではシェルのPATHを引き継がないため，PATH上
 
 ## 設定と終了
 
-GUIの「設定と接続先」で，複数サーバーの名前・URL・APIトークンを登録できます．「接続テスト」は**保存済み**のプロファイルに対し認証とモデル・デバイス・話者分離対応を確認します．「既定の設定を保存」で実行先などの選択をMCPにも共有します．GUIは保存された設定と履歴を定期的に読み直します．未保存の編集中は設定の再読み込みを保留します．
+右上の「接続先」からモーダルを開き，複数サーバーの名前・URL・APIトークンを登録できます．「保存して接続」は保存後に認証とモデル・デバイス・話者分離対応を確認し，成功した接続先を実行先に設定します．ローカルのデバイス指定とHugging Faceトークンは右上の設定アイコンから変更できます．実行設定は文字起こしの開始時，または設定モーダルの「保存」でMCPにも共有します．GUIは保存された設定と履歴を定期的に読み直します．未保存の編集中は設定の再読み込みを保留します．
 
-ウィンドウを閉じると非表示になり，サービスと処理は継続します．メニューバーのnoteitアイコンから再表示・明示終了できます．アプリメニューの終了／Command-Qも明示終了です．明示終了はローカル推論のプロセスグループを停止します．サーバーに投入済みのリモートジョブは継続し，次回の共通サービス起動後に状態・結果を回収します．実行中ジョブのキャンセルUIはありません．
+ウィンドウを閉じると非表示になり，サービスと処理は継続します．メニューバーのnoteitアイコンから再表示・明示終了できます．アプリメニューの終了／Command-Qも明示終了です．明示終了はローカル推論のプロセスグループを停止します．サーバーに投入済みのリモートジョブは継続し，次回の共通サービス起動後に状態・結果を回収します．
+
+個別のジョブを止める場合は履歴で選び，結果欄の「停止」を押してください．待機中のジョブは実行せず，ローカルの実行中ジョブは子プロセスを停止します．リモートではサーバーへ停止を要求し，子プロセス終了後の`cancelled`を確認して「停止済み」にします．アップロード中の停止要求はアップロード応答の回収後に送信します．通信断中は「停止中」のまま再試行し，Mac側サービスを再起動しても停止要求を引き継ぎます．リモート停止を使うには推論サーバーも同じ版へ更新・再ビルドしてください．
 
 設定とジョブ履歴は`~/Library/Application Support/noteit/frontend.sqlite3`，認証情報はmacOS Keychainのサービス名`noteit`に保存します．`NOTEIT_DATA_DIR`でデータの保存先を変更できます．GUIとMCPで同じ値を使ってください．プロファイル変更・削除後も既存ジョブ用のURLとKeychain参照を保持するため，過去の認証情報は自動削除しません．
 
@@ -90,7 +92,7 @@ uv run --directory workers/transcription_worker transcribe-audio meeting.m4a -n 
 NOTEIT_API_TOKEN=... uv run --directory workers/transcription_worker transcribe-audio meeting.m4a --server http://server:8765 --no-diarize
 ```
 
-CLIは共有デスクトップサービスを経由せず，直接ローカル処理／HTTP処理を行います．HTTP APIの`POST /jobs`はmultipartの音声と`diarize`を受け付け，省略時trueです．`GET /models`には`engines`，`devices`，`diarization`を含みます．`GET /jobs/{id}`で状態，`GET /jobs/{id}/result`でJSONを取得します．`/health`以外はBearerトークンが必須です．
+CLIは共有デスクトップサービスを経由せず，直接ローカル処理／HTTP処理を行います．HTTP APIの`POST /jobs`はmultipartの音声と`diarize`を受け付け，省略時trueです．`GET /models`には`engines`，`devices`，`diarization`を含みます．`GET /jobs/{id}`で状態，`GET /jobs/{id}/result`でJSONを取得します．`POST /jobs/{id}/cancel`で待機中・実行中のジョブを停止できます．モデル・ジョブのAPIはBearerトークンが必須で，`/health`は認証不要です．
 
 音声は全体を一度だけ認識し，共通の単語・秒単位の時刻形式へ変換します．faster-whisperはVAD後に元音声の時刻へ復元する実装を使用し，MLXは無音を連結除去せず元の音声を認識します．話者分離を使う場合も，話者ごとの断片を繰り返し認識しません．話者分離OFFでは話者ラベルと`diarizer_model`がnullになり，旧形式の話者ラベル付きJSONも読み込めます．
 
@@ -114,7 +116,7 @@ docker compose ps
 curl http://127.0.0.1:8765/health
 ```
 
-GUIで`http://ホストIP:8765`と同じAPIトークンを登録し，接続テストを実行します．SSHトンネルを使う場合は`NOTEIT_BIND_IP=127.0.0.1`とし，Macから`ssh -N -L 8765:127.0.0.1:8765 server`で接続してください．
+GUI右上の「接続先」に`http://ホストIP:8765`と同じAPIトークンを登録し，「保存して接続」を実行します．SSHトンネルを使う場合は`NOTEIT_BIND_IP=127.0.0.1`とし，Macから`ssh -N -L 8765:127.0.0.1:8765 server`で接続してください．
 
 NVIDIA構成はホストのNVIDIAドライバーとNVIDIA Container Toolkitが必要です．
 
@@ -152,7 +154,7 @@ MacのTailscaleを接続状態にし，ターミナルで確認します．
 curl --connect-timeout 10 http://100.101.102.103:8765/health
 ```
 
-GUIの「設定と接続先」にURL `http://100.101.102.103:8765`とサーバーのAPIトークンを登録し，保存後に接続テストを実行します．文字起こし画面でその接続先を選び，MCPでも既定にする場合は「既定の設定を保存」を実行してください．この構成ではSSHトンネルは不要です．Tailscale IP宛ての通信は[Tailscaleが暗号化](https://tailscale.com/docs/secure-networks)します．
+GUI右上の「接続先」に，実際のサーバーIPを使ったURLとAPIトークンを登録し，「保存して接続」を実行します．認証に成功すると実行先へ設定され，MCPにも共有されます．この構成ではSSHトンネルは不要です．Tailscale IP宛ての通信は[Tailscaleが暗号化](https://tailscale.com/docs/secure-networks)します．
 
 tailnetのアクセス制御を制限している場合は，MacからサーバーのTCP 8765番へ接続できる[ACL／grants](https://tailscale.com/docs/features/access-control/acls)を設定してください．ホストのファイアウォールでも必要な通信を許可します．サーバーでの確認も`127.0.0.1`ではなく，設定したTailscale IP宛てに行ってください．
 
@@ -167,4 +169,4 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 npm --prefix apps/desktop run tauri -- build --debug --no-bundle
 ```
 
-CPU／Apple GPU／HTTPの実機確認と環境上の未検証事項は[検証記録](docs/verification.md)に記載します．LLM自動補正・要約API，追加学習，公開インターネット向けHTTPS，キャンセルUIは初版に含みません．MCPの`summarize_meeting`は呼び出し元LLM用のプロンプトであり，要約APIではありません．
+CPU／Apple GPU／HTTPの実機確認と環境上の未検証事項は[検証記録](docs/verification.md)に記載します．LLM自動補正・要約API，追加学習，公開インターネット向けHTTPSは初版に含みません．MCPの`summarize_meeting`は呼び出し元LLM用のプロンプトであり，要約APIではありません．

@@ -106,6 +106,7 @@ def create_app(
             if existing is not None and existing.status not in {
                 JobStatus.FAILED,
                 JobStatus.INTERRUPTED,
+                JobStatus.CANCELLED,
             }:
                 return existing.snapshot()
 
@@ -165,7 +166,7 @@ def create_app(
     @app.get("/jobs/{job_id}/result", dependencies=[Depends(authorize)])
     def get_result(job_id: str) -> dict[str, Any]:
         job = find_job(job_id)
-        if job.status in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+        if job.status in {JobStatus.FAILED, JobStatus.INTERRUPTED, JobStatus.CANCELLED}:
             raise HTTPException(status_code=409, detail=f"Job failed: {job.error}")
         if job.result is None:
             raise HTTPException(
@@ -173,6 +174,15 @@ def create_app(
                 detail=f"Job not finished (status: {job.status.value}).",
             )
         return job.result.model_dump(mode="json")
+
+    @app.post("/jobs/{job_id}/cancel", dependencies=[Depends(authorize)])
+    def cancel_job(job_id: str) -> dict[str, Any]:
+        find_job(job_id)
+        if not isinstance(service, ProcessTranscriptionService):
+            raise HTTPException(
+                409, "Cancellation requires the process inference service"
+            )
+        return service.cancel(job_id).snapshot()
 
     return app
 

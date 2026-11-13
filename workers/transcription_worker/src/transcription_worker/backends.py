@@ -32,7 +32,12 @@ from .service import (
     TranscriptionService,
 )
 
-FINISHED = {JobStatus.DONE.value, JobStatus.FAILED.value, JobStatus.INTERRUPTED.value}
+FINISHED = {
+    JobStatus.DONE.value,
+    JobStatus.FAILED.value,
+    JobStatus.INTERRUPTED.value,
+    JobStatus.CANCELLED.value,
+}
 
 
 class TranscriptionBackend(Protocol):
@@ -181,6 +186,7 @@ class RemoteBackend:
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         path = Path(audio_path).expanduser().resolve()
         if not path.is_file():
@@ -199,7 +205,7 @@ class RemoteBackend:
             }.items()
             if value is not None
         }
-        job_id = job_key(path, options)
+        job_id = job_id or job_key(path, options)
 
         # Skip the upload when the server already has (or is running) this job.
         try:
@@ -207,6 +213,7 @@ class RemoteBackend:
             if existing["status"] not in {
                 JobStatus.FAILED.value,
                 JobStatus.INTERRUPTED.value,
+                JobStatus.CANCELLED.value,
             }:
                 return existing
         except KeyError:
@@ -237,6 +244,14 @@ class RemoteBackend:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return self._request("GET", "/jobs")
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        try:
+            return self._request("POST", f"/jobs/{job_id}/cancel", timeout=15.0)
+        except KeyError as error:
+            raise RuntimeError(
+                "停止に対応した推論サーバーへ更新してください．"
+            ) from error
 
 
 def backend_from_env() -> TranscriptionBackend:

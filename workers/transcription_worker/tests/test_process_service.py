@@ -79,11 +79,12 @@ def isolated(tmp_path, monkeypatch):
 
     def launch(script=STUB):
         def popen(command, **kwargs):
-            assert command == [
+            if command != [
                 sys.executable,
                 "-m",
                 "transcription_worker.inference_process",
-            ]
+            ]:
+                return real_popen(command, **kwargs)
             assert kwargs["start_new_session"] is True
             child = real_popen([sys.executable, "-c", script], **kwargs)
             children.append(child)
@@ -318,3 +319,44 @@ def test_server_entrypoint_uses_process_service(monkeypatch):
     app.assert_called_once_with(factory.return_value, "api-test-token")
     assert run.call_args.args == ("test-app",)
     assert run.call_args.kwargs["timeout_graceful_shutdown"] == 5
+
+
+def test_cancel_active_and_queued_jobs_without_stopping_the_service(
+    isolated, tmp_path, monkeypatch
+):
+    service, children, _ = isolated
+    gate = tmp_path / "cancel-gate"
+    monkeypatch.setenv("NOTEIT_TEST_INFERENCE_GATE", str(gate))
+    audio = tmp_path / "original.wav"
+    audio.touch()
+    first = service.submit(audio, diarize=False, job_id="first")
+    queued = service.submit(audio, diarize=False, job_id="queued")
+    wait_until(lambda: first.status == JobStatus.TRANSCRIBING)
+    with TestClient(create_app(service, "api-test-token")) as client:
+        headers = {"Authorization": "Bearer api-test-token"}
+        assert client.post("/jobs/first/cancel").status_code == 401
+        assert client.post("/jobs/unknown/cancel", headers=headers).status_code == 404
+        assert (
+            client.post("/jobs/queued/cancel", headers=headers).json()["status"]
+            == "cancelled"
+        )
+        assert queued.finished.is_set() and children[0].poll() is None
+        response = client.post("/jobs/first/cancel", headers=headers)
+        assert response.status_code == 200
+        assert service.wait(first.id, 10).status == JobStatus.CANCELLED
+        assert children[0].poll() is not None and service._process is None
+        assert first.error is None and first.result is None and audio.exists()
+        assert client.get("/jobs/first/result", headers=headers).status_code == 409
+        gate.touch()
+        restarted_job = service.submit(audio, diarize=False, job_id="first")
+        assert service.wait(restarted_job.id, 10).status == JobStatus.DONE
+        assert len(children) == 2
+        assert (
+            client.post("/jobs/first/cancel", headers=headers).json()["status"]
+            == "done"
+        )
+    restored = ProcessTranscriptionService(service.config)
+    try:
+        assert restored.get_job("queued").status == JobStatus.CANCELLED
+    finally:
+        restored.close()
